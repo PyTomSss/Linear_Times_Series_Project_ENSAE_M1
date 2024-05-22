@@ -1,0 +1,591 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code.
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*.
+
+```{r}
+# Importation des librairies nécessaires 
+chooseCRANmirror()
+install.packages("gss")
+install.packages("tseries")
+install.packages("urca")
+install.packages("fUnitRoots")
+install.packages("httpgd")
+
+require(forecast)
+require(zoo)
+require(tseries)
+require(fUnitRoots)
+require(ggplot2)
+library(urca) 
+library(tseries)
+library(astsa)
+library(stats)
+library(lmtest)
+library(forecast)
+library(httpgd)
+
+#Certaines librairies sont inutiles
+
+# Démarre le serveur graphique httpgd
+hgd()
+```
+
+```{r}
+## PARTIE 1 : Les données
+
+## Extraction de la série sur la production de vin (de raisin) en France
+
+data <- read.csv("/Users/eva-andreetiomo/Downloads/valeurs_mensuelles.csv", sep=";")
+
+data <- data[-(1:4), ] #on se retire les 4 premières lignes
+
+values <- as.numeric(data[, 2]) #Extraction de la colonne qui nous intéresse
+
+
+#On permute la série pour ailleurs avoir les dates dans l'ordre croissant
+
+values_rev <- rev(values)
+
+ts_data <- ts(values_rev, frequency=12, start=c(1990,1)) #Création de l'objet série temporelle
+
+
+# Enregistrement du graphique en tant que fichier PNG
+png("série_brute.png", width = 800, height = 500)
+par(mar = c(5, 4, 4, 2) + 0.1) # Modification des marges
+plot.ts(ts_data, type="l", lwd=1, col="red", xlab="Dates", ylab="Valeur de la production", main = "Série brute de la production de vin")
+dev.off()
+
+# Affichage du graphique dans RStudio
+par(mar = c(5, 4, 4, 2) + 0.1) # Modification des marges
+plot.ts(ts_data, type="l", lwd=1, col="red", xlab="Dates", ylab="Valeur de la production", main = "Série brute de la production de vin")
+
+```
+
+```{r}
+#On peut regarder l'ACF pour voir que pas de unit root à priori quoique le premier coef est assez proche de 1
+
+png("ACF_nondiff.png", width = 800, height = 500)
+acf(ts_data,lag.max=30, main = "Autocorrelation Function")
+dev.off()
+# affichage dans Rstudio des ACF 
+acf(ts_data)
+```
+
+```{r}
+#On régresse la série sur t afin de voir s'il y a une tendance à titre informatif -> il faudrait vérifier l'absence d'autocorrélation entre les résidus pour que le test
+#soit valide
+
+summary(lm(ts_data ~ time(ts_data)))
+```
+
+```{r}
+# Fonction pour effectuer le test ADF avec une constante et une tendance
+adf_test_with_trend <- function(ts_data, max_lags) {
+  for (lag in 0:max_lags) {
+    adf_result <- adf.test(ts_data, alternative = "stationary", k = lag)
+    p_value <- adf_result$p.value
+    cat("Lag:", lag, "p-value:", p_value, "\n")
+    
+    # Vérifier si la p-value est supérieure à 0.05
+    if (p_value > 0.05) {
+      cat("La p-value n'est plus significative au niveau de 5% pour le lag =", lag, "\n")
+      return(list(adf_result = adf_result, lag = lag))
+    }
+  }
+  return(list(adf_result = adf_result, lag = max_lags))
+}
+
+# Appel de la fonction avec un nombre maximal de lags
+result <- adf_test_with_trend(ts_data, max_lags = 20)
+
+# Résumé des résultats du test ADF
+print(result$adf_result)
+cat("Lag choisi:", result$lag, "\n")
+
+# Conclusion sur la stationnarité
+if (result$adf_result$p.value < 0.05) {
+  cat("La série est stationnaire.\n")
+} else {
+  cat("La série n'est pas stationnaire.\n")
+}
+```
+
+```{r}
+# On effectue le test de KPSS pour s'assurer que le résultat trouvé avec le test ADF tient la route
+
+kpss_test <- kpss.test(ts_data)
+
+# On affiche le résumé des résultats du test KPSS
+print(kpss_test)
+
+# Interprétation des résultats (KPSS a pour hypothèse nulle, une hypothèse de stationnarité)
+if (kpss_test$p.value < 0.05) {
+  cat("Le test KPSS rejette l'hypothèse nulle de stationnarité (p-value < 0.05). La série n'est pas stationnaire.\n")
+} else {
+  cat("Le test KPSS ne rejette pas l'hypothèse nulle de stationnarité (p-value >= 0.05). La série est stationnaire.\n")
+}
+
+```
+
+```{r}
+# On remarque avec les deux tests que la série n'est pas stationnaire. Nous allons procéder à de la différenciation pour la rendre stationnaire :
+
+#création de la série différenciée qui semble plus stationnaire
+ts_data1 <- diff(ts_data, differences=1)
+
+
+#Représentation graphique de la série différenciée
+
+png("Serie_diff.png", width = 1000, height = 500)
+plot.ts(ts_data1,type="l",lwd=1, col="red", xlab="Time", ylab="Valeur", main = "Série de la production brute de vin différenciée")
+dev.off()
+
+#affichage du graphique directement sur Rstudio
+par(mar = c(5, 4, 4, 2) + 0.1) # Modification des marges
+plot.ts(ts_data1, type="l", lwd=1, col="red", xlab="Dates", ylab="Valeur de la production", main = "Série de la production de vin différenciée")
+```
+
+```{r}
+# si on ne prend pas en compte le gros pic de 2020 qui correspond au choc dans la production lié à la pandémie, nous pouvons supposer que la série différenciée est stationnaire. Nous allons donc déterminer les paramètres de la série pour en faire un ARMA et nous allons également tester sa stationnarité
+```
+
+```{r}
+#Représentation des auto-corrélogrammes et auto-corrélogrammes partiels -> hypothèse de racine unitaire beaucoup moins probable
+
+png("pacf après différentiation.png", width=800, height = 600)
+pacf(ts_data1)
+dev.off()
+
+png("acf après différentiation.png", width=800, height = 600)
+acf(ts_data1)
+dev.off()
+
+#affichage des deux sur Rstudio directement 
+acf(ts_data1)
+pacf(ts_data1)
+```
+
+```{r}
+#On régresse la série sur t afin de voir s'il y a une tendance à titre informatif -> il faudrait vérifier l'absence d'autocorrélation entre les résidus pour que le test
+#soit valide
+
+summary(lm(ts_data1 ~ time(ts_data1)))
+```
+
+```{r}
+#on reprend le raisonnement précédent pour faire les tests de stationnarité ADF sur la série différenciée : 
+# Fonction pour effectuer le test ADF avec une constante et une tendance
+adf_test_with_trend <- function(ts_data1, max_lags) {
+  for (lag in 0:max_lags) {
+    adf_result <- adf.test(ts_data1, alternative = "stationary", k = lag)
+    p_value <- adf_result$p.value
+    cat("Lag:", lag, "p-value:", p_value, "\n")
+    
+    # Vérifier si la p-value est supérieure à 0.05
+    if (p_value > 0.05) {
+      cat("La p-value n'est plus significative au niveau de 5% pour le lag =", lag, "\n")
+      return(list(adf_result = adf_result, lag = lag))
+    }
+  }
+  return(list(adf_result = adf_result, lag = max_lags))
+}
+
+# Appel de la fonction avec un nombre maximal de lags
+result <- adf_test_with_trend(ts_data1, max_lags = 20)
+
+# Résumé des résultats du test ADF
+print(result$adf_result)
+cat("Lag choisi:", result$lag, "\n")
+
+# Conclusion sur la stationnarité
+if (result$adf_result$p.value < 0.05) {
+  cat("La série est stationnaire.\n")
+} else {
+  cat("La série n'est pas stationnaire.\n")
+}
+```
+
+```{r}
+#Comme précédemment, on effectue le test KPSS pour être sûr de bien avoir une série stationnaire : 
+# On effectue le test de KPSS pour s'assurer que le résultat trouvé avec le test ADF tient la route
+
+kpss_test <- kpss.test(ts_data1)
+
+# On affiche le résumé des résultats du test KPSS
+print(kpss_test)
+
+# Interprétation des résultats (KPSS a pour hypothèse nulle, une hypothèse de stationnarité)
+if (kpss_test$p.value < 0.05) {
+  cat("Le test KPSS rejette l'hypothèse nulle de stationnarité (p-value < 0.05). La série n'est pas stationnaire.\n")
+} else {
+  cat("Le test KPSS ne rejette pas l'hypothèse nulle de stationnarité (p-value >= 0.05). La série est stationnaire.\n")
+}
+
+```
+
+```{r}
+# Nous avons obtenu, une série stationnaire. Nous passons désormais à la partie 2 qui a pour but de trouver les bons modèles ARMA pour la série
+# PARTIE II
+```
+
+```{r}
+# en observant les ACF et PACF trouvés précédemment sur notre série différenciée, on suppose que p*=7 (car après 7 le PACF prend des valeurs non significatives) et que q*=14 (car après 15 l'ACF prend des valeurs non significatives.) De plus, on a différencié une fois la série pour la rendre stationnaire donc on en déduit que d*=1
+# on effectue ainsi des ACF et PACF pour trouver les résultats qu'on suppose
+
+acf(ts_data1,lag.max=30, main = "Autocorrelation Function") #déjà enregistrés en png
+pacf(ts_data,lag.max=30, main = "Partial-Autocorrelation Function") 
+```
+
+```{r}
+# On procède à une 1ère sélection de candidats sur les AIC et BIC car on en a beaucoup : 
+
+AIC_values <- c()
+BIC_values <- c()
+arima_models <- list()
+# Boucle pour ajuster les modèles ARIMA avec différentes valeurs de p et q
+for (p in 1:7) {
+  for (q in 1:14) {
+    
+    arima_model <- arima(ts_data, order = c(p, 1, q)) #Attention on fit le modèle non-différencié sur le ARIMA avec d=1
+    
+    # Calcul de AIC et BIC pour le modèle
+    AIC_values <- c(AIC_values, AIC(arima_model))
+    BIC_values <- c(BIC_values, BIC(arima_model))
+    
+    #On ajoute dans la liste
+    model_name <- paste("ARIMA(p=", p, ", d=1, q=", q, ")", sep="")
+    arima_models[[model_name]] <- arima_model
+  } 
+}
+
+# On choisit les 2 modèles minimisant AIC et BIC
+min_AIC_indices <- order(AIC_values)[1:2]
+min_BIC_indices <- order(BIC_values)[1:2]
+
+# on accède aux noms des modèles ARIMA minimisant AIC
+min_AIC_models <- names(arima_models)[min_AIC_indices]
+min_BIC_models <- names(arima_models)[min_BIC_indices]
+
+print("Modèles ARIMA minimisant AIC :")
+print(min_AIC_models)
+
+print("Modèles ARIMA minimisant BIC :")
+print(min_BIC_models)
+```
+
+```{r}
+## On a 4 candidats et on va vérifier que leurs résidus ne sont pas autocorrélés et que leurs coefficients max sont significativement non nuls
+
+#fonction de test des significativite ́s individuelles des coefficients
+signif <- function(estim){
+  coef <- estim$coef
+  se <- sqrt(diag(estim$var.coef))
+  t <- coef/se
+  pval <- (1-pnorm(abs(t)))*2
+  return(rbind(coef,se,pval))
+}
+
+ARMA_5_3 <- arima(ts_data, order = c(5, 1, 3))
+ARMA_6_3 <- arima(ts_data, order = c(6, 1, 3))
+ARMA_1_2 <- arima(ts_data, order = c(1, 1, 2))
+ARMA_2_1 <- arima(ts_data, order = c(2, 1, 1))
+
+signif(ARMA_5_3) #test de significativité des coeffs
+signif(ARMA_6_3)
+signif(ARMA_1_2) 
+signif(ARMA_2_1)
+```
+
+```{r}
+# a priori, on va garder les deux derniers ARIMA possibles. En effet les coefficients des retards les plus élevés AR(5) et AR(6) ne rejettent chacun par leur nullité à 95% (p-value > 0.05). Les modèles ARIMA (5,1,3) et ARIMA (6,1,3) sont donc mal ajustés.
+
+#Test des autocorrélations pour 50 lags max sur les deux ARIMA restants
+test_ljung_box <- function(y, p, d, q) {
+  
+  # on commence à p+q pour pouvoir converger vers un chi_2 adéquat
+  lag <- p+q
+  
+  # test de Ljung-Box et vérifier la p-value
+  while (lag < 50) {
+    
+    arima_model <- arima(y, order = c(p, d, q))
+    
+    residuals <- residuals(arima_model)
+    
+    # p-value pour le lag actuel
+    p_value <- Box.test(residuals, lag = lag, type = "Ljung-Box")$p.value
+    
+    cat("Lag:", lag, "p-value:", p_value, "\n")
+    
+    # Vérifier si supérieure à 0.05
+    if (p_value < 0.05) {
+      cat("L'abscence d'autocorrélation des résidus est rejetée à 5% pour le lag :", lag, "\n")
+      break
+    }
+    
+    # update le lag
+    lag <- lag + 1
+  }
+}
+
+# Utilisation de la fonction avec des valeurs spécifiques de p, d et q
+test_ljung_box(ts_data, 1, 1, 2)
+```
+
+```{r}
+# on remarque que pour l'ARIMA précédent, l'absence d'autocorrélation n'est jamais rejeté à 95% sur les 49 premiers lags. On en déduit que ce modèle n'est pas valide.
+# Ainsi, la sortie précédente élimine l'ARIMA (1,1,2). On teste pour l'ARIMA (2,1,1)
+test_ljung_box(ts_data, 2, 1, 1)
+```
+
+```{r}
+# L'absence d'autocorrélation n'est jamais rejetée à 95% jusqu'à 38 retards pour l'ARIMA (2,1,1). Ce modèle est donc satisfaisant et valide.
+# Nous concluons la partie 2 en ayant le modèle ARIMA (2,1,1) choisi pour notre série traitant la production de vin. # Nous pouvons désormais passer à la phase prévision : PARTIE III
+```
+
+```{r}
+# Ajustement du modèle ARIMA(2,1,1)
+model_arima <- arima(ts_data, order = c(2, 1, 1))
+
+# Afficher les résultats de l'ajustement du modèle
+summary(model_arima)
+```
+
+```{r}
+# Prédiction à 1 mois avec intervalle de confiance
+forecast_arima <- forecast(model_arima, h = 1, level=95)
+
+# Afficher les prédictions
+plot(forecast_arima, main = "Prédiction ARIMA(2,1,1) à 1 mois avec intervalle de confiance à 95%", xlab = "Temps", ylab = "Valeur")
+```
+
+```{r}
+# Extraction des prédictions et des intervalles de confiance sur la série entière
+preds <- zoo(matrix(NA, ncol = 1, nrow = 1), order.by = time(forecast_arima$mean))
+preds[,1] <- forecast_arima$mean
+
+# Afficher les prédictions et les intervalles de confiance graphiquement
+plot(forecast_arima, main = "Prédiction ARIMA(2,1,1) à 1 mois avec intervalle de confiance à 95%", xlab = "Temps", ylab = "Valeur")
+
+# Ajouter les observations historiques pour le contexte
+lines(ts_data, col = "red")
+
+# Ajouter le point de prédiction avec une taille plus petite
+points(time(preds), preds[,1], col = "blue", pch = 16, cex = 0.7) # pch = 16 pour un point plein, cex = 0.7 pour une taille plus petite
+```
+
+```{r}
+# On effectue également la prédiction de l'ARIMA (2,1,1) à 2 mois : 
+# Extraction des prédictions et des intervalles de confiance
+preds <- zoo(matrix(NA, ncol = 1, nrow = 2), order.by = time(forecast_arima$mean))
+preds[,1] <- forecast_arima$mean
+
+# Afficher les prédictions et les intervalles de confiance graphiquement
+plot(forecast_arima, main = "Prédiction ARIMA(2,1,1) à 2 mois avec intervalle de confiance à 95%", xlab = "Temps", ylab = "Valeur")
+
+# Ajouter les observations historiques pour le contexte
+lines(ts_data, col = "green")
+```
+
+```{r}
+#pour voir si le modèle est causal, on regarde les racines de notre polynôme et on voit si elles sont en dehors du cercle unité
+
+ARMA_2_1$coef
+ARMA_2_1$sigma
+phi_1 <- as.numeric(ARMA_2_1$coef[1])
+phi_2 <- as.numeric(ARMA_2_1$coef[2])
+psi_1 <- as.numeric(ARMA_2_1$coef[3])
+sigma2 <- as.numeric(ARMA_2_1$sigma)
+
+#on vérifie que on a bien les bons coefficiens
+phi_1
+phi_2
+psi_1
+sigma2
+```
+
+```{r}
+#On calcule désormais les racines de nos polynomes MA et AR
+ar_coefs <- c(phi_1, phi_2)
+ma_coefs <- c(psi_1)
+
+ar_roots <- polyroot(c(1, -ar_coefs))
+ma_roots <- polyroot(c(1, ma_coefs))
+
+abs(ar_roots)
+abs(ma_roots)
+all(abs(ar_roots) > 1) 
+
+all(abs(ma_roots) > 1)
+```
+
+```{r}
+# Charger les packages nécessaires
+library(knitr)
+library(kableExtra)
+
+# Création du tableau des coefficients
+tableau_coefficients <- data.frame(
+  Coefficients = c("$\\varphi_1$", "$\\varphi_2$", "$\\psi_1$"),
+  Valeurs = c(phi_1, phi_2, psi_1)
+)
+# Affichage du tableau en utilisant kable
+kable(tableau_coefficients, caption = "Coefficients du modèle ARMA(2,1)") %>%
+kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+```{r}
+install.packages("webshot")
+install.packages("htmltools")
+install_phantomjs()
+library(webshot)
+library(htmltools)
+```
+
+```{r}
+# Enregistrement du tableau en HTML
+html_file <- "tableau_coefficients.html"
+save_kable(kable(tableau_coefficients, caption = "Coefficients du modèle ARMA(2,1)") %>%
+kable_styling(bootstrap_options = c("striped", "hover", "condensed")), html_file)
+# Capture de l'HTML en image
+webshot(html_file, "tableau_coefficients.png")
+```
+
+```{r}
+# On récupère notre image pour l'incorporer dans notre rapport overleaf
+install.packages("magick")
+library(magick)
+image_path <- "tableau_coefficients.png"
+img <- image_read(image_path)
+print(img)
+```
+
+```{r}
+# je cherche à obtenir l'intervalle de confiance sur une période plus restreinte
+## Extraction de la série sur la production de vin (de raisin) en France
+
+# Installer et Charger le package dplyr
+install.packages("dplyr")
+library(dplyr)
+
+head(data)
+```
+
+```{r}
+# on retire les lignes 64 à 411 pour avoir un dataframe qui commence en 2019
+datavf1 <- data %>% slice(-(64:413))
+print(datavf1)
+```
+
+```{r}
+values1 <- as.numeric(datavf[, 2]) #Extraction de la colonne qui nous intéresse
+
+
+#On permute la série pour ailleurs avoir les dates dans l'ordre croissant
+
+values_rev1 <- rev(values1)
+
+
+ts_datavf <- ts(values_rev1, frequency=12, start=c(2019,01)) #Création de l'objet série temporelle
+
+
+# Enregistrement du graphique en tant que fichier PNG
+png("série_raccourcie.png", width = 800, height = 500)
+par(mar = c(5, 4, 4, 2) + 0.1) # Modification des marges
+plot.ts(ts_datavf, type="l", lwd=1, col="green", xlab="Dates", ylab="Valeur de la production", main = "Série brute de la production de vin")
+dev.off()
+
+# Affichage du graphique dans RStudio
+par(mar = c(5, 4, 4, 2) + 0.1) # Modification des marges
+plot.ts(ts_datavf, type="l", lwd=1, col="green", xlab="Dates", ylab="Valeur de la production", main = "Série raccourcie de la production de vin")
+```
+
+```{r}
+# on retire les lignes 64 à 411 pour avoir un dataframe qui commence en 2019 et qui finit en 2023 afin de repérer si nos prédictions pour début 2024 peuvent être considérées comme pertinentes
+datavf <- data %>% slice(-(c(1:2, 64:413)))
+print(datavf)
+```
+
+```{r}
+
+values2 <- as.numeric(datavf[, 2]) #Extraction de la colonne qui nous intéresse
+
+
+#On permute la série pour ailleurs avoir les dates dans l'ordre croissant
+
+values_rev2 <- rev(values2)
+
+
+ts_datavf <- ts(values_rev2, frequency=12, start=c(2019,01)) #Création de l'objet série temporelle
+
+
+# Enregistrement du graphique en tant que fichier PNG
+png("série_raccourcie.png", width = 800, height = 500)
+par(mar = c(5, 4, 4, 2) + 0.1) # Modification des marges
+plot.ts(ts_datavf, type="l", lwd=1, col="red", xlab="Dates", ylab="Valeur de la production", main = "Série brute de la production de vin")
+dev.off()
+
+# Affichage du graphique dans RStudio
+par(mar = c(5, 4, 4, 2) + 0.1) # Modification des marges
+plot.ts(ts_datavf, type="l", lwd=1, col="red", xlab="Dates", ylab="Valeur de la production", main = "Série raccourcie de la production de vin")
+```
+
+```{r}
+# Normalement la fonction forecast permet d'obtenir directement l'intervalle de confiance à 95% mais si on doit le détailler, faire le code suivant pour répondre à la question 8 pour les intervalles de confiance :
+# Je fais désormais les prédictions à horizon 1 : 
+# Ajustement du modèle ARIMA(2,1,1)
+model_arima <- arima(ts_datavf, order = c(2, 1, 1))
+
+# Afficher les résultats de l'ajustement du modèle
+summary(model_arima)
+
+# Prédiction à 1 mois avec intervalle de confiance
+library(forecast)
+library(zoo)
+forecast_arima <- forecast(model_arima, h = 1, level=95)
+
+# Afficher les prédictions
+print(forecast_arima)
+
+# Extraction des prédictions et des intervalles de confiance
+preds <- zoo(matrix(NA, ncol = 1, nrow = 1), order.by = time(forecast_arima$mean))
+preds[,1] <- forecast_arima$mean
+
+# Afficher les prédictions et les intervalles de confiance graphiquement
+plot(forecast_arima, main = "Prédiction ARIMA(2,1,1) à 1 mois", xlab = "Temps", ylab = "Valeur")
+
+# Ajouter les observations historiques pour le contexte
+lines(ts_datavf, col = "blue")
+```
+
+```{r}
+# Je fais désormais les prédictions à horizon 2 : 
+forecast_arima <- forecast(model_arima, h = 2, level=95)
+
+# Afficher les prédictions
+print(forecast_arima)
+
+# Extraction des prédictions et des intervalles de confiance
+preds <- zoo(matrix(NA, ncol = 1, nrow = 1), order.by = time(forecast_arima$mean))
+preds[,1] <- forecast_arima$mean
+
+# Afficher les prédictions et les intervalles de confiance graphiquement
+plot(forecast_arima, main = "Prédiction ARIMA(2,1,1) à 1 et 2 mois", xlab = "Temps", ylab = "Valeur")
+
+# Ajouter les observations historiques pour le contexte
+lines(ts_datavf, col = "green")
+```
+
+```         
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
